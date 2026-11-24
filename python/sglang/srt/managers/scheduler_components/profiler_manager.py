@@ -24,7 +24,11 @@ from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import get_device, get_parallel
 from sglang.srt.utils import is_mps, is_npu
 from sglang.srt.utils.profile_merger import ProfileMerger
-from sglang.srt.utils.profile_utils import ProfileManager
+from sglang.srt.utils.profile_utils import (
+    ProfileManager,
+    cuda_profiler_control,
+    validate_ncu_range_activities,
+)
 from sglang.srt.utils.torch_npu_patch_utils import apply_torch_npu_patches
 
 if TYPE_CHECKING:
@@ -120,14 +124,17 @@ class SchedulerProfilerManager:
                 message="Profiling is already in progress. Call /stop_profile first.",
             )
 
-        self.profile_by_stage = profile_by_stage
-        self.merge_profiles = merge_profiles
-
         if output_dir is None:
             output_dir = os.getenv("SGLANG_TORCH_PROFILER_DIR", "/tmp")
         if activities is None:
             activities = ["CPU", "GPU"]
+        try:
+            validate_ncu_range_activities(activities)
+        except ValueError as error:
+            return ProfileReqOutput(success=False, message=str(error))
 
+        self.profile_by_stage = profile_by_stage
+        self.merge_profiles = merge_profiles
         self.torch_profiler_output_dir = Path(output_dir).expanduser()
         self.torch_profiler_with_stack = with_stack
         self.torch_profiler_record_shapes = record_shapes
@@ -271,9 +278,16 @@ class SchedulerProfilerManager:
             )
             self.profile_in_progress = True
 
-        if "CUDA_PROFILER" in activities:
-            if get_device().gpu_id == get_device().base_gpu_id:
-                torch.cuda.cudart().cudaProfilerStart()
+        if "CUDA_PROFILER" in activities or "NCU_RANGE" in activities:
+            try:
+                cuda_profiler_control(
+                    start=True,
+                    all_workers="NCU_RANGE" in activities,
+                    first_rank_in_node=get_device().gpu_id == get_device().base_gpu_id,
+                )
+            except RuntimeError as error:
+                logger.error("CUDA profiler start failed: %s", error)
+                return ProfileReqOutput(success=False, message=str(error))
             self.profile_in_progress = True
 
         self._apply_detailed_annotations(self.detailed_annotations)
@@ -384,9 +398,19 @@ class SchedulerProfilerManager:
             torch.cuda.memory._dump_snapshot(memory_profile_path)
             torch.cuda.memory._record_memory_history(enabled=None)
 
-        if "CUDA_PROFILER" in self.profiler_activities:
-            if get_device().gpu_id == get_device().base_gpu_id:
-                torch.cuda.cudart().cudaProfilerStop()
+        if (
+            "CUDA_PROFILER" in self.profiler_activities
+            or "NCU_RANGE" in self.profiler_activities
+        ):
+            try:
+                cuda_profiler_control(
+                    start=False,
+                    all_workers="NCU_RANGE" in self.profiler_activities,
+                    first_rank_in_node=get_device().gpu_id == get_device().base_gpu_id,
+                )
+            except RuntimeError as error:
+                logger.error("CUDA profiler stop failed: %s", error)
+                return ProfileReqOutput(success=False, message=str(error))
 
         merge_message = self._merge_profile_traces()
 
@@ -470,7 +494,7 @@ class SchedulerProfilerManager:
                     recv_req.profile_stages,
                 )
             else:
-                self._init_profile(
+                result = self._init_profile(
                     recv_req.output_dir,
                     recv_req.start_step,
                     recv_req.num_steps,
@@ -483,6 +507,8 @@ class SchedulerProfilerManager:
                     recv_req.profile_prefix,
                     recv_req.detailed_annotations,
                 )
+                if not result.success:
+                    return result
                 return self._start_profile()
         else:
             return self._stop_profile()

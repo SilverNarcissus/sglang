@@ -2544,9 +2544,10 @@ def cli_main():
         type=str,
         nargs="+",
         default=["CPU", "GPU"],
-        choices=["CPU", "GPU", "CUDA_PROFILER", "XPU", "MEM"],
-        help="Profiler activities to capture: CPU, GPU, XPU, CUDA_PROFILER, MEM "
-        "(MEM dumps a torch.cuda.memory snapshot, viewable at https://pytorch.org/memory_viz).",
+        choices=["CPU", "GPU", "CUDA_PROFILER", "NCU_RANGE", "XPU", "MEM"],
+        help="Profiler activities to capture: CPU, GPU, XPU, CUDA_PROFILER, NCU_RANGE, MEM "
+        "(MEM dumps a torch.cuda.memory snapshot, viewable at https://pytorch.org/memory_viz). "
+        "NCU_RANGE must be used alone and marks a range on every CUDA GPU worker.",
     )
     parser.add_argument(
         "--profile-start-step",

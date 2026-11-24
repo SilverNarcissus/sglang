@@ -40,6 +40,33 @@ logger = logging.getLogger(__name__)
 GRAPH_CAPTURE_PROFILE_DIRNAME = "graph_capture_profile"
 
 
+def validate_ncu_range_activities(activities: List[str]) -> None:
+    if "NCU_RANGE" not in activities:
+        return
+    if set(activities) != {"NCU_RANGE"}:
+        raise ValueError("NCU_RANGE must be used without other profiler activities")
+    if not current_platform.is_cuda() or get_device().gpu_id is None:
+        raise ValueError("NCU_RANGE requires a CUDA GPU worker")
+
+
+def cuda_profiler_control(
+    *, start: bool, all_workers: bool, first_rank_in_node: bool
+) -> None:
+    if not (all_workers or first_rank_in_node):
+        return
+    name = "cudaProfilerStart" if start else "cudaProfilerStop"
+    logger.info(
+        "Call %s (gpu_id=%s, all_workers=%s)",
+        name,
+        get_device().gpu_id,
+        all_workers,
+    )
+    cudart = torch.cuda.cudart()
+    status = cudart.cudaProfilerStart() if start else cudart.cudaProfilerStop()
+    if all_workers and int(status) != 0:
+        raise RuntimeError(f"{name} failed: {status}")
+
+
 def graph_capture_profile_dir() -> str:
     """``<SGLANG_TORCH_PROFILER_DIR>/graph_capture_profile`` — the one directory
     both capture-trace modes write to. Change the location here only."""
@@ -117,6 +144,10 @@ class ProfileManager:
             output_dir = os.getenv("SGLANG_TORCH_PROFILER_DIR", "/tmp")
         if activities is None:
             activities = ["CPU", "GPU"]
+        try:
+            validate_ncu_range_activities(activities)
+        except ValueError as error:
+            return ProfileReqOutput(success=False, message=str(error))
 
         self.profiler_kwargs = dict(
             activities=activities,
@@ -245,6 +276,7 @@ class _StageBasedTrigger:
 class _ProfilerBase(ABC):
     @staticmethod
     def create(activities, with_stack, record_shapes, **kwargs):
+        validate_ncu_range_activities(activities)
         inners = []
         if current_platform.is_out_of_tree():
             if current_platform.get_torch_profiler_activity_str() in activities:
@@ -267,8 +299,10 @@ class _ProfilerBase(ABC):
             )
         if "MEM" in activities:
             inners.append(_ProfilerMemory(**kwargs))
-        if "CUDA_PROFILER" in activities:
-            inners.append(_ProfilerCudart(**kwargs))
+        if "CUDA_PROFILER" in activities or "NCU_RANGE" in activities:
+            inners.append(
+                _ProfilerCudart(**kwargs, all_workers="NCU_RANGE" in activities)
+            )
         if "RPD" in activities:  # for ROCM
             inners.append(_ProfilerRPD(**kwargs))
 
@@ -401,15 +435,23 @@ class _ProfilerMemory(_ProfilerConcreteBase):
 
 
 class _ProfilerCudart(_ProfilerConcreteBase):
+    def __init__(self, *, all_workers: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.all_workers = all_workers
+
     def start(self):
-        if self.first_rank_in_node:
-            logger.info(f"Call cudaProfilerStart")
-            torch.cuda.cudart().cudaProfilerStart()
+        cuda_profiler_control(
+            start=True,
+            all_workers=self.all_workers,
+            first_rank_in_node=self.first_rank_in_node,
+        )
 
     def stop(self):
-        if self.first_rank_in_node:
-            logger.info(f"Call cudaProfilerStop")
-            torch.cuda.cudart().cudaProfilerStop()
+        cuda_profiler_control(
+            start=False,
+            all_workers=self.all_workers,
+            first_rank_in_node=self.first_rank_in_node,
+        )
 
 
 class _ProfilerRPD(_ProfilerConcreteBase):

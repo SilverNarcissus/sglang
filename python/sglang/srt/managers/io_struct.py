@@ -2264,7 +2264,8 @@ class ProfileReq(BaseReq, kw_only=True):
     # If it is set, profiling is automatically stopped after this step, and
     # the caller doesn't need to run stop_profile.
     num_steps: Optional[int] = None
-    # The activities to record. The choices are ["CPU", "GPU", "MEM", "RPD"]
+    # 可选活动包括 CPU/GPU/MEM/RPD、仅 base GPU 触发的 CUDA_PROFILER，
+    # 以及在每个 GPU worker 自身上下文中触发、必须单独使用的 NCU_RANGE。
     activities: Optional[List[str]] = None
     # Whether profile by stages (e.g., prefill and decode) separately
     profile_by_stage: bool = False
